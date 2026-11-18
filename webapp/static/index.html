@@ -3,13 +3,13 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Aerospike latency</title>
-<link rel="stylesheet" href="/static/styles.css">
+<title>Aero Lens</title>
+<link rel="stylesheet" href="/static/styles.css?v=20261118">
 </head>
 <body>
 
 <header class="topbar">
-  <div class="brand">Aerospike log analyzer</div>
+  <div class="brand">Aero Lens</div>
   <nav class="tabs">
     <button class="tab on" id="tabLatency" data-tab="latency">Latency</button>
     <button class="tab" id="tabErrors" data-tab="errors">Errors <span class="count" id="errBadge" hidden>0</span></button>
@@ -22,10 +22,21 @@
 <section class="toolbar">
   <label class="field">Source
     <select id="dataSource">
+      <option value="fetch">Fetch cluster (Ansible)</option>
       <option value="upload">Manual upload</option>
       <option value="live">Live ingest</option>
     </select>
   </label>
+
+  <span id="fetchControls">
+    <label class="field">Cluster
+      <select id="fetchCluster"></select>
+    </label>
+    <label class="field">Incident date
+      <input type="date" id="fetchDate" title="Calendar day (30-day retention)">
+    </label>
+    <button class="btn primary" id="fetchLogsBtn" title="Ansible collects rotated logs and delivers to this host">Fetch logs</button>
+  </span>
 
   <span id="uploadControls">
     <button class="btn primary" id="uploadBtn">Upload logs</button>
@@ -110,7 +121,7 @@
   <strong>Drop logs here</strong>
   <span class="dim">aerospike.log, rotated .gz/.bz2/.xz, or a collectinfo bundle (.tar, .tar.gz, .tgz, .zip).
     Upload one log per node for cluster-wide comparison; include the collectinfo bundle to resolve node IPs.
-    Or switch Source to <em>Live ingest</em> after deploying the forwarder on each node.</span>
+    Or use <em>Fetch cluster</em> for Ansible-collected logs, or <em>Live ingest</em> with a forwarder.</span>
   <div class="upload-log" id="uploadLog"></div>
 </section>
 
@@ -237,6 +248,6 @@
   </div>
 </main>
 
-<script src="/static/app.js"></script>
+<script src="/static/app.js?v=20261118"></script>
 </body>
 </html>

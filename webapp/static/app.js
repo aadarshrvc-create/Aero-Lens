@@ -13,10 +13,13 @@ const state = {
   cluster: null,
   reports: [],
   savedReport: null,    // set while viewing a report loaded from disk
-  dataSource: 'upload', // upload | live
+  dataSource: 'fetch', // fetch | upload | live
   liveInventory: null,
   liveCluster: '',
   selectedLiveNodes: new Set(),
+  fetchCatalog: null,
+  fetchCluster: '',
+  fetchJobId: null,
 };
 
 const OP_COLORS = {
@@ -130,6 +133,9 @@ function inputToGmt(value) {
 
 fetch('/api/health').then((r) => r.json()).then((info) => {
   const node = $('#toolStatus');
+  if (info.fetch_enabled === false && $('#dataSource').value === 'fetch') {
+    node.title = (node.title || '') + ' · fetch_clusters.json missing';
+  }
   const stale = info.stale_sources || [];
   if (stale.length) {
     // The browser always gets fresh static files, so a reloaded page can sit in front
@@ -145,6 +151,146 @@ fetch('/api/health').then((r) => r.json()).then((info) => {
 }).catch(() => {});
 
 // ---------------------------------------------------------------------------
+// Ansible fetch (cluster + date)
+// ---------------------------------------------------------------------------
+
+function fetchClusterMeta() {
+  return state.fetchCatalog?.clusters?.find((c) => c.id === state.fetchCluster);
+}
+
+async function loadFetchClusters() {
+  $('#runStatus').textContent = 'loading fetch catalog…';
+  try {
+    const res = await fetch('/api/fetch/clusters');
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || res.statusText);
+    state.fetchCatalog = data;
+    const sel = $('#fetchCluster');
+    sel.textContent = '';
+    const clusters = data.clusters || [];
+    if (!clusters.length) {
+      state.fetchCluster = '';
+      $('#runStatus').textContent = 'no clusters in fetch_clusters.json';
+      return;
+    }
+    if (!clusters.some((c) => c.id === state.fetchCluster)) state.fetchCluster = clusters[0].id;
+    clusters.forEach((c) => {
+      const label = c.label && c.label !== c.id ? `${c.label} (${c.id})` : c.id;
+      const opt = el('option', { value: c.id, text: label });
+      if (c.id === state.fetchCluster) opt.selected = true;
+      sel.append(opt);
+    });
+    renderFetchClusterInfo();
+    $('#runStatus').textContent = `fetch catalog · ${clusters.length} cluster(s) · ${data.retention_days || 30}d retention`;
+  } catch (err) {
+    $('#runStatus').textContent = `fetch catalog: ${err.message}`;
+  }
+}
+
+function renderFetchClusterInfo() {
+  const c = fetchClusterMeta();
+  if (!c) {
+    $('#clusterInfo').textContent = 'fetch — configure fetch_clusters.json on server';
+    return;
+  }
+  const nodes = c.node_count != null ? `${c.node_count} node(s)` : 'Ansible inventory';
+  $('#clusterInfo').textContent = `fetch · ${c.id} · ${nodes} · pick date → Fetch logs`;
+}
+
+function applySessionPayload(data) {
+  state.session = data.session;
+  state.files = data.files || [];
+  state.errorsKey = null;
+  state.selectedFiles.clear();
+  state.selectedHists.clear();
+  (data.files || []).forEach((f) => state.selectedFiles.add(f.id));
+  renderCluster(data.cluster || {});
+  renderSkipped(data.skipped);
+  renderLogs();
+  $('#logsPanel').hidden = false;
+  showTab();
+  if (data.upload_hint) {
+    const row = el('div', { class: 'dim small', text: data.upload_hint });
+    $('#uploadLog').append(row);
+  }
+}
+
+async function pollFetchJob(jobId, pollPath) {
+  const maxTries = 120;
+  for (let i = 0; i < maxTries; i += 1) {
+    await new Promise((r) => setTimeout(r, 5000));
+    const res = await fetch(pollPath || `/api/fetch/jobs/${encodeURIComponent(jobId)}`);
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || res.statusText);
+    const status = data.status || '';
+    $('#runStatus').textContent = `fetch ${status}… (${((i + 1) * 5)}s) — Ansible collecting logs`;
+    if (status === 'completed' && data.files?.length) {
+      applySessionPayload(data);
+      const lat = data.latency_logs ?? 0;
+      $('#runStatus').textContent = `fetch done · ${lat} latency log(s) · job ${jobId.slice(0, 8)}`;
+      $('#clusterInfo').textContent = `fetched · ${state.fetchCluster} · ${$('#fetchDate').value}`;
+      return;
+    }
+    if (status === 'failed') {
+      throw new Error(data.error || data.ansible?.detail || 'fetch failed');
+    }
+    if (status === 'completed' && !(data.files || []).length) {
+      throw new Error('fetch completed but no logs were ingested');
+    }
+  }
+  throw new Error('fetch timed out — check /tmp/aero_lens_<job>.log on Ansible host');
+}
+
+async function startClusterFetch() {
+  const cluster = state.fetchCluster || $('#fetchCluster').value;
+  const date = $('#fetchDate').value;
+  if (!cluster) { $('#runStatus').textContent = 'select a cluster'; return; }
+  if (!date) { $('#runStatus').textContent = 'pick an incident date'; return; }
+
+  $('#fetchLogsBtn').disabled = true;
+  $('#dropzone').hidden = true;
+  $('#uploadLog').textContent = '';
+  $('#runStatus').textContent = 'starting Ansible fetch…';
+  try {
+    const res = await fetch('/api/fetch', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ cluster, date }),
+    });
+    const data = await res.json();
+    if (res.status === 200 && data.files) {
+      applySessionPayload(data);
+      $('#runStatus').textContent = 'fetch complete';
+      return;
+    }
+    if (!res.ok && res.status !== 202) throw new Error(data.error || res.statusText);
+    if (!data.job_id) throw new Error('no job_id from server');
+    state.fetchJobId = data.job_id;
+    state.session = data.session;
+    await pollFetchJob(data.job_id, data.poll);
+  } catch (err) {
+    $('#runStatus').textContent = `fetch failed: ${err.message}`;
+  } finally {
+    $('#fetchLogsBtn').disabled = false;
+  }
+}
+
+$('#fetchCluster').addEventListener('change', () => {
+  state.fetchCluster = $('#fetchCluster').value;
+  renderFetchClusterInfo();
+});
+
+$('#fetchLogsBtn').addEventListener('click', () => startClusterFetch());
+
+(function initFetchDate() {
+  const today = new Date();
+  const y = today.getFullYear();
+  const m = pad2(today.getMonth() + 1);
+  const d = pad2(today.getDate());
+  if ($('#fetchDate') && !$('#fetchDate').value) $('#fetchDate').value = `${y}-${m}-${d}`;
+}());
+
+// ---------------------------------------------------------------------------
 // live ingest (forwarded logs on the server)
 // ---------------------------------------------------------------------------
 
@@ -154,11 +300,14 @@ function liveClusterEntry() {
 
 function syncDataSourceUI() {
   const live = state.dataSource === 'live';
-  $('#uploadControls').hidden = live;
+  const fetch = state.dataSource === 'fetch';
+  $('#fetchControls').hidden = !fetch;
+  $('#uploadControls').hidden = fetch || live;
   $('#liveControls').hidden = !live;
-  $('#dropzone').hidden = live || (!state.files.length && !state.payload && !state.errors);
+  $('#dropzone').hidden = fetch || live || (!state.files.length && !state.payload && !state.errors);
   renderLogs();
   if (live) renderLiveClusterInfo();
+  else if (fetch) renderFetchClusterInfo();
   else if (!state.files.length && !state.cluster) $('#clusterInfo').textContent = 'no logs loaded';
   showTab();
 }
@@ -214,7 +363,14 @@ $('#dataSource').addEventListener('change', () => {
   state.dataSource = $('#dataSource').value;
   syncDataSourceUI();
   if (state.dataSource === 'live') fetchLiveInventory();
+  if (state.dataSource === 'fetch') loadFetchClusters();
 });
+
+// Default source: Fetch cluster (Ansible)
+if ($('#dataSource').value === 'fetch') {
+  syncDataSourceUI();
+  loadFetchClusters();
+}
 
 $('#refreshLiveBtn').addEventListener('click', () => fetchLiveInventory());
 
@@ -420,11 +576,9 @@ async function uploadAll(files) {
       const res = await fetch('/api/upload', { method: 'POST', headers, body: file });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || res.statusText);
-      state.session = data.session;
-      state.files = data.files;
-      state.errorsKey = null;   // the file set changed, so any error report is stale
-      data.added.forEach((id) => state.selectedFiles.add(id));
-      const lat = data.latency_logs ?? data.added.length;
+      data.added?.forEach((id) => state.selectedFiles.add(id));
+      applySessionPayload(data);
+      const lat = data.latency_logs ?? data.added?.length ?? 0;
       const errOnly = data.error_only_logs ?? 0;
       let summary = `${file.name}: ${lat} latency log(s)`;
       if (errOnly) summary += `, ${errOnly} error-only`;
@@ -433,11 +587,6 @@ async function uploadAll(files) {
       if (data.upload_hint) {
         row.append(el('div', { class: 'dim small', text: data.upload_hint }));
       }
-      renderCluster(data.cluster);
-      renderSkipped(data.skipped);
-      renderLogs();
-      $('#logsPanel').hidden = false;
-      showTab();
     } catch (err) {
       row.className = 'err';
       row.textContent = `${file.name}: ${err.message}`;
@@ -1103,15 +1252,20 @@ function showTab() {
 
   const ready = errors ? state.errors : state.payload;
   const hint = $('#tabHint');
-  hint.hidden = !!ready || (!state.savedReport && (live ? !liveClusterEntry() : !state.files.length));
+  const fetch = state.dataSource === 'fetch';
+  hint.hidden = !!ready || (!state.savedReport && (live ? !liveClusterEntry() : !state.files.length && !fetch));
   if (state.savedReport && !ready) {
     hint.textContent = `This saved report does not include ${errors ? 'an error scan' : 'a latency analysis'}.`;
     charts.forEach((chart) => { if (chart.owner === state.tab) chart.draw(); });
     return;
   }
-  hint.textContent = errors
-    ? (live ? 'Press Run to scan forwarded logs for errors.' : 'Press Run to scan the selected logs for errors.')
-    : (live ? 'Press Run to analyse latency from the ingest store.' : 'Press Run to analyse latency for the selected logs.');
+  if (fetch && !state.files.length) {
+    hint.textContent = 'Choose cluster and incident date, then Fetch logs. When logs appear, press Run.';
+  } else {
+    hint.textContent = errors
+      ? (live ? 'Press Run to scan forwarded logs for errors.' : 'Press Run to scan the selected logs for errors.')
+      : (live ? 'Press Run to analyse latency from the ingest store.' : 'Press Run to analyse latency for the selected logs.');
+  }
 
   // A canvas sized while its tab was display:none has zero width and draw() skips it,
   // so charts are redrawn whenever their tab comes back into view.

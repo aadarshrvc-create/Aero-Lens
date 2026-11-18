@@ -1471,7 +1471,10 @@ class Handler(BaseHTTPRequestHandler):
         payload["status"] = "completed"
         payload["job_id"] = job_id
         payload["fetch_mode"] = "ansible"
-        log_fetch_jobs.patch_job(cfg, job_id, status="completed", bundle=bundle, error=None)
+        log_fetch_jobs.patch_job(
+            cfg, job_id, status="completed", bundle=bundle, error=None,
+            latency_logs=payload.get("latency_logs"), scan_seconds=payload.get("scan_seconds"),
+        )
         self.send_json(payload)
 
     def handle_analyze(self):
