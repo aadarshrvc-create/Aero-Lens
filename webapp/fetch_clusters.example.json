@@ -1,0 +1,38 @@
+{
+  "fetch_mode": "ansible",
+  "retention_days": 30,
+  "log_dir": "/var/log/aerospike",
+  "rotation_suffix_plus_days": 1,
+  "spool_dir": "/var/spool/aero-lens",
+  "fetch_token": "",
+  "ansible": {
+    "host": "dbeansible0-az-prod-ci",
+    "user": "dbops",
+    "remote_script": "/home/dbops/dbeautomation/aerospike_ansible/aero_lens/run_aero_lens_fetch.sh",
+    "ssh_options": [
+      "-o",
+      "BatchMode=yes",
+      "-o",
+      "StrictHostKeyChecking=accept-new",
+      "-o",
+      "ConnectTimeout=30"
+    ]
+  },
+  "delivery": {
+    "tool_host": "10.12.72.115",
+    "tool_user": "dbops",
+    "callback_url": "http://10.12.72.115:8787/api/fetch/complete"
+  },
+  "clusters": {
+    "az-prod-ci-upgrade": {
+      "label": "Aerospike upgrade test (3 nodes)",
+      "ansible_group": "aerospike_upgradetest_az_prod_ci",
+      "node_count": 3,
+      "nodes": [
+        { "host": "10.12.75.179", "hostname": "aerospikeupgradetest0-az-prod-ci" },
+        { "host": "10.12.75.180", "hostname": "aerospikeupgradetest1-az-prod-ci" },
+        { "host": "10.12.75.181", "hostname": "aerospikeupgradetest2-az-prod-ci" }
+      ]
+    }
+  }
+}

@@ -1,0 +1,8 @@
+Aerospike Log Collection
+Cluster=commaerospike
+Collected=2026-11-06T06:06:16Z
+Nodes=10.12.73.224,10.12.73.232,10.12.73.248,10.12.73.24,10.12.73.25,10.12.73.32,10.12.73.38,10.12.73.39,10.12.73.58
+LogDir=/var/log/aerospike
+LogPatterns=aerospike.log-20261101.gz,aerospike.log-20261031.gz
+Collectinfo=True
+CollectinfoNode=10.12.73.224

@@ -1,0 +1,9 @@
+__pycache__/
+*.py[cod]
+.DS_Store
+.webapp-venv/
+venv/
+.venv/
+*.log
+webapp/fetch_clusters.json
+ansible/.aero_lens_staging/

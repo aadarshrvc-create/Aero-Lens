@@ -1,0 +1,41 @@
+---
+- name: Collect Aerospike logs per node
+  hosts: "{{ aero_cluster_group }}"
+  gather_facts: false
+  become: true
+  vars:
+    aero_log_dir: "{{ aero_log_dir | default('/var/log/aerospike') }}"
+  tasks:
+    - name: staging on controller
+      ansible.builtin.file:
+        path: "{{ aero_staging }}/{{ aero_job_id }}"
+        state: directory
+        mode: "0750"
+      delegate_to: localhost
+      run_once: true
+
+    - name: stat log slice
+      ansible.builtin.stat:
+        path: "{{ aero_log_dir }}/{{ item }}"
+      loop: "{{ aero_log_basenames }}"
+      register: log_stats
+
+    - name: fetch existing log files to controller
+      ansible.builtin.fetch:
+        src: "{{ aero_log_dir }}/{{ item.item }}"
+        dest: "{{ aero_staging }}/{{ aero_job_id }}/{{ inventory_hostname }}__{{ item.item }}"
+        flat: true
+      when: item.stat is defined and item.stat.exists
+      loop: "{{ log_stats.results }}"
+      loop_control:
+        label: "{{ item.item }}"
+
+- name: Archive and publish
+  hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: build tarball
+      ansible.builtin.archive:
+        path: "{{ aero_staging }}/{{ aero_job_id }}/"
+        dest: "{{ aero_staging }}/{{ aero_job_id }}.tar.gz"
+        format: gz

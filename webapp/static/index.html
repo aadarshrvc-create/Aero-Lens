@@ -1,0 +1,242 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Aerospike latency</title>
+<link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+
+<header class="topbar">
+  <div class="brand">Aerospike log analyzer</div>
+  <nav class="tabs">
+    <button class="tab on" id="tabLatency" data-tab="latency">Latency</button>
+    <button class="tab" id="tabErrors" data-tab="errors">Errors <span class="count" id="errBadge" hidden>0</span></button>
+  </nav>
+  <div class="cluster" id="clusterInfo">no logs loaded</div>
+  <div class="spacer"></div>
+  <div class="tool-status" id="toolStatus"></div>
+</header>
+
+<section class="toolbar">
+  <label class="field">Source
+    <select id="dataSource">
+      <option value="upload">Manual upload</option>
+      <option value="live">Live ingest</option>
+    </select>
+  </label>
+
+  <span id="uploadControls">
+    <button class="btn primary" id="uploadBtn">Upload logs</button>
+    <input type="file" id="fileInput" multiple hidden>
+  </span>
+
+  <span id="liveControls" hidden>
+    <label class="field">Cluster
+      <select id="liveCluster"></select>
+    </label>
+    <button class="btn" id="refreshLiveBtn" title="Reload nodes seen by the ingest store">Refresh</button>
+  </span>
+
+  <button class="btn" id="logsBtn">Logs <span class="count" id="logsCount">0</span></button>
+  <button class="btn" id="saveBtn" title="Save this analysis so it can be reopened without re-uploading the logs" disabled>Save</button>
+  <button class="btn" id="reportsBtn">Saved <span class="count" id="reportsCount">0</span></button>
+
+  <span class="sep"></span>
+
+  <label class="field">Times
+    <select id="tzMode">
+      <option value="ist">IST (UTC+05:30)</option>
+      <option value="local">Browser local</option>
+      <option value="gmt">GMT (as written in the log)</option>
+    </select>
+  </label>
+
+  <label class="field">Window <span class="tz" id="windowTz">IST</span>
+    <select id="windowMode">
+      <option value="full">Complete log</option>
+      <option value="range">Custom range</option>
+    </select>
+  </label>
+  <span class="field range" id="rangeFields" hidden>
+    <input type="datetime-local" id="fromDt" step="1">
+    <span class="dim">→</span>
+    <input type="datetime-local" id="toDt" step="1">
+    <button class="btn sm" data-last="900">15m</button>
+    <button class="btn sm" data-last="3600">1h</button>
+    <button class="btn sm" data-last="21600">6h</button>
+    <span class="dim small" id="windowLocal"></span>
+  </span>
+
+  <span id="latencyOpts">
+    <label class="field">Slice
+      <select id="sliceSeconds">
+        <option value="10" selected>10s</option>
+        <option value="30">30s</option>
+        <option value="60">1m</option>
+        <option value="300">5m</option>
+      </select>
+    </label>
+
+    <label class="field">Alert
+      <input type="number" id="alertPct" value="1" min="0" step="0.1" class="num">
+      <span class="dim">% slower than</span>
+      <input type="number" id="alertThreshold" value="8" min="1" step="1" class="num">
+      <span class="dim">ms, ignoring slices under</span>
+      <input type="number" id="minOpsRate" value="50" min="0" step="10" class="num"
+             title="A percentage computed from a handful of operations is noise, not latency.">
+      <span class="dim">ops/sec</span>
+    </label>
+  </span>
+
+  <span id="errorOpts" hidden>
+    <label class="field"><input type="checkbox" id="hideRoutine" checked>
+      <span class="dim">hide routine cluster chatter</span></label>
+  </span>
+
+  <button class="btn primary" id="runBtn">Run</button>
+  <span class="run-status" id="runStatus"></span>
+
+  <div class="spacer"></div>
+  <div class="zoom-info" id="zoomInfo" hidden>
+    <span id="zoomLabel"></span>
+    <button class="btn sm" id="zoomRerun">Re-run on this window</button>
+    <button class="btn sm" id="zoomReset">Reset zoom</button>
+  </div>
+</section>
+
+<section class="dropzone" id="dropzone" hidden>
+  <strong>Drop logs here</strong>
+  <span class="dim">aerospike.log, rotated .gz/.bz2/.xz, or a collectinfo bundle (.tar, .tar.gz, .tgz, .zip).
+    Upload one log per node for cluster-wide comparison; include the collectinfo bundle to resolve node IPs.
+    Or switch Source to <em>Live ingest</em> after deploying the forwarder on each node.</span>
+  <div class="upload-log" id="uploadLog"></div>
+</section>
+
+<section class="panel logs-panel" id="logsPanel" hidden>
+  <div class="panel-head">
+    <h2>Logs</h2>
+    <div class="actions">
+      <button class="btn sm" id="selectAllLogs">Select all</button>
+      <button class="btn sm" id="selectCovering" title="Keep only logs whose time range overlaps the custom window">Select logs covering window</button>
+      <button class="btn sm" id="clearSession">Clear</button>
+      <button class="btn sm" id="closeLogs">Close</button>
+    </div>
+  </div>
+  <div class="logs-grid" id="logsGrid"></div>
+  <div class="dim small" id="skippedList"></div>
+</section>
+
+<section class="panel logs-panel" id="reportsPanel" hidden>
+  <div class="panel-head">
+    <h2>Saved reports</h2>
+    <div class="actions">
+      <span class="dim small" id="reportsDir"></span>
+      <button class="btn sm" id="closeReports">Close</button>
+    </div>
+  </div>
+  <div id="reportsList"></div>
+</section>
+
+<section class="panel viewing-saved" id="savedBanner" hidden>
+  <span id="savedBannerText"></span>
+  <button class="btn sm" id="exitSaved">Back to live session</button>
+</section>
+
+<section class="panel tab-hint" id="tabHint" hidden></section>
+
+<main id="dash" hidden>
+  <div class="stats" id="statTiles"></div>
+  <div class="panel" id="headlinePanel"></div>
+
+  <div class="panel">
+    <div class="panel-head"><h2>Throughput by operation</h2><span class="dim small" id="opsPanelHint"></span></div>
+    <div id="opsChart"></div>
+  </div>
+
+  <div class="panel">
+    <div class="panel-head"><h2 id="latTitle">Latency by operation</h2><span class="dim small">drag to zoom, double-click to reset</span></div>
+    <div id="latChart"></div>
+  </div>
+
+  <div class="panel">
+    <div class="panel-head"><h2>Cumulative by operation</h2></div>
+    <div id="opTable"></div>
+  </div>
+
+  <div class="panel">
+    <div class="panel-head"><h2>By node</h2></div>
+    <div id="nodeTable"></div>
+  </div>
+
+  <div class="panel">
+    <div class="panel-head">
+      <h2>Per histogram detail</h2>
+      <div class="actions"><button class="btn sm" id="downloadJson">Download JSON</button></div>
+    </div>
+    <div id="detailList"></div>
+  </div>
+</main>
+
+<main id="errdash" hidden>
+  <div class="stats" id="errTiles"></div>
+  <div class="panel" id="errHeadline"></div>
+
+  <div class="panel">
+    <div class="panel-head">
+      <h2>Operational conditions</h2>
+      <span class="dim small">Same signals you would grep for: proto-fd-max refusals, stop-writes, migrations, orphan nodes</span>
+    </div>
+    <div id="errConditions"></div>
+  </div>
+
+  <div class="panel">
+    <div class="panel-head">
+      <h2>Errors over time</h2>
+      <span class="dim small" id="errTimelineHint"></span>
+    </div>
+    <div id="errTimeline"></div>
+  </div>
+
+  <div class="panel">
+    <div class="panel-head">
+      <h2>Logged problems</h2>
+      <span class="dim small">WARNING / CRITICAL lines, grouped by message. Click a row for detail.</span>
+    </div>
+    <div id="errEvents"></div>
+  </div>
+
+  <div class="panel">
+    <div class="panel-head">
+      <h2>Failed transactions</h2>
+      <span class="dim small">error / timeout counters from the namespace ticker lines</span>
+    </div>
+    <div id="errCounters"></div>
+  </div>
+
+  <div class="panel">
+    <div class="panel-head">
+      <h2>Health signals</h2>
+      <span class="dim small">drag to zoom, double-click to reset</span>
+    </div>
+    <div id="errGauges"></div>
+  </div>
+
+  <div class="panel">
+    <div class="panel-head"><h2>By node</h2></div>
+    <div id="errNodes"></div>
+  </div>
+
+  <div class="panel">
+    <div class="panel-head">
+      <h2>Cluster events</h2>
+      <div class="actions"><button class="btn sm" id="downloadErrors">Download JSON</button></div>
+    </div>
+    <div id="errCluster"></div>
+  </div>
+</main>
+
+<script src="/static/app.js"></script>
+</body>
+</html>
