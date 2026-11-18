@@ -144,9 +144,10 @@ fetch('/api/health').then((r) => r.json()).then((info) => {
     node.classList.add('bad');
     node.title = `This process started at ${info.started} and is still running the older code.`;
   } else {
-    node.textContent = info.tool_exists ? 'asloglatency ready' : `asloglatency missing at ${info.tool}`;
+    const ver = info.ui_version ? ` · ${info.ui_version}` : '';
+    node.textContent = info.tool_exists ? `asloglatency ready${ver}` : `asloglatency missing at ${info.tool}`;
     node.classList.toggle('bad', !info.tool_exists);
-    node.title = info.tool;
+    node.title = [info.tool, info.static_dir, info.ui_version].filter(Boolean).join('\n');
   }
 }).catch(() => {});
 

@@ -46,6 +46,7 @@ import ingest as log_ingest
 HERE = os.path.dirname(os.path.abspath(__file__))
 STATIC_DIR = os.path.join(HERE, "static")
 DEFAULT_TOOL = os.path.join(os.path.dirname(HERE), "asloglatency", "log_latency.py")
+UI_VERSION = "2026.11.18-fetch-ui"
 
 # Saved reports live outside the session tree so they survive a restart and a session
 # reap. Each report is two files: a small <id>.meta.json for the listing, and the full
@@ -1199,7 +1200,14 @@ class Handler(BaseHTTPRequestHandler):
                  ".css": "text/css", ".svg": "image/svg+xml"}
         ctype = types.get(os.path.splitext(path)[1], "application/octet-stream")
         with open(path, "rb") as fh:
-            self.send_payload(fh.read(), "%s; charset=utf-8" % ctype)
+            body = fh.read()
+        self.send_response(200)
+        self.send_header("Content-Type", "%s; charset=utf-8" % ctype)
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store, no-cache, must-revalidate")
+        self.send_header("Pragma", "no-cache")
+        self.end_headers()
+        self.wfile.write(body)
 
     def read_body(self, limit=MAX_UPLOAD_BYTES):
         length = int(self.headers.get("Content-Length") or 0)
@@ -1231,6 +1239,8 @@ class Handler(BaseHTTPRequestHandler):
                             "tool_exists": os.path.isfile(self.tool_path),
                             "stale_sources": stale_sources(),
                             "started": iso_now(),
+                            "ui_version": UI_VERSION,
+                            "static_dir": STATIC_DIR,
                             "ingest_dir": INGEST_DIR,
                             "ingest_auth": bool(INGEST_TOKEN),
                             "fetch_config": FETCH_CLUSTERS_PATH,
