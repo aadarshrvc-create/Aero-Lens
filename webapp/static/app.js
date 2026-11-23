@@ -128,28 +128,26 @@ function inputToGmt(value) {
 }
 
 // ---------------------------------------------------------------------------
-// tool status
+// Application version and health
 // ---------------------------------------------------------------------------
 
 fetch('/api/health').then((r) => r.json()).then((info) => {
   const node = $('#toolStatus');
-  if (info.fetch_enabled === false && $('#dataSource').value === 'fetch') {
-    node.title = (node.title || '') + ' · fetch_clusters.json missing';
-  }
+  const version = info.ui_version ? `Version ${info.ui_version}` : 'Version unavailable';
+  node.textContent = version;
+  const warnings = [];
+  if (info.fetch_enabled === false) warnings.push('Cluster fetch is not configured.');
+  if (!info.tool_exists) warnings.push('Latency analysis tool is unavailable.');
   const stale = info.stale_sources || [];
   if (stale.length) {
     // The browser always gets fresh static files, so a reloaded page can sit in front
     // of a server still running the code it was started with.
-    node.textContent = `${stale.join(' and ')} changed on disk — restart the server`;
-    node.classList.add('bad');
-    node.title = `This process started at ${info.started} and is still running the older code.`;
-  } else {
-    const ver = info.ui_version ? ` · ${info.ui_version}` : '';
-    node.textContent = info.tool_exists ? `asloglatency ready${ver}` : `asloglatency missing at ${info.tool}`;
-    node.classList.toggle('bad', !info.tool_exists);
-    node.title = [info.tool, info.static_dir, info.ui_version].filter(Boolean).join('\n');
+    node.textContent = `${version} · Restart required`;
+    warnings.push(`${stale.join(' and ')} changed on disk. Restart the server to load the changes.`);
   }
-}).catch(() => {});
+  node.classList.toggle('bad', !!stale.length || !info.tool_exists);
+  node.title = [version, ...warnings].join('\n');
+}).catch(() => { $('#toolStatus').textContent = 'Version unavailable'; });
 
 // ---------------------------------------------------------------------------
 // Ansible fetch (cluster + date)
