@@ -45,6 +45,7 @@ class Node {
   remove() {}
   addEventListener(ev, fn) { (this.listeners[ev] = this.listeners[ev] || []).push(fn); }
   fire(ev, arg) { (this.listeners[ev] || []).forEach((fn) => fn(arg || { preventDefault() {}, button: 0 })); }
+  click() { this.clicks = (this.clicks || 0) + 1; this.fire('click'); }
   hasChildNodes() { return this.children.length > 0 || !!this._text; }
   get firstChild() { return this.children[0]; }
   querySelector() { return new Node('div'); }
@@ -68,6 +69,7 @@ const ctx2d = new Proxy({}, { get: () => () => {} });
 const registry = new Map();
 ids.forEach((id) => registry.set(id, new Node('div')));
 registry.get('hideRoutine').checked = true;
+registry.get('dataSource').value = 'fetch';
 registry.get('windowMode').value = 'full';
 registry.get('sliceSeconds').value = '10';
 registry.get('alertPct').value = '1';
@@ -116,6 +118,23 @@ return { state, renderErrors, renderDashboard, buildEventDetail, renderErrCluste
          requestedWindow, fmtTime, fmtStamp, localize, applyTz, tz: () => TZ };`);
 const api = run();
 
+console.log('--- startup and upload controls ---');
+if (!registry.get('uploadControls').hidden) throw new Error('upload controls visible in fetch mode');
+registry.get('dataSource').value = 'upload';
+registry.get('dataSource').fire('change');
+if (registry.get('uploadControls').hidden || !registry.get('fetchControls').hidden) {
+  throw new Error('switching to manual upload did not update the controls');
+}
+registry.get('uploadBtn').fire('click');
+if (registry.get('fileInput').clicks !== 1) throw new Error('Upload logs did not open the file input');
+if (registry.get('dropzone').hidden) throw new Error('upload feedback is hidden');
+for (const id of ['runBtn', 'logsBtn', 'tabLatency', 'tabErrors']) {
+  if (!registry.get(id).listeners.click?.length) throw new Error(`#${id} was not initialized`);
+}
+console.log('  default startup, source switching, upload picker, and button bindings passed');
+
+// API fixtures are optional when checking only startup and upload controls.
+if (process.argv[2]) {
 const errorsReport = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
 const latency = process.argv[3] ? JSON.parse(fs.readFileSync(process.argv[3], 'utf8')) : null;
 
@@ -268,3 +287,4 @@ console.log('  errors headline carries no GMT in IST mode');
 console.log('\nheadline text rendered:');
 headline.split('  ').filter((s) => s.trim()).slice(0, 8).forEach((s) => console.log('   ', s.trim()));
 console.log('\nALL RENDER CHECKS PASSED');
+}

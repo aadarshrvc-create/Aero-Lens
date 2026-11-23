@@ -365,12 +365,6 @@ $('#dataSource').addEventListener('change', () => {
   if (state.dataSource === 'fetch') loadFetchClusters();
 });
 
-// Default source: Fetch cluster (Ansible)
-if ($('#dataSource').value === 'fetch') {
-  syncDataSourceUI();
-  loadFetchClusters();
-}
-
 $('#refreshLiveBtn').addEventListener('click', () => fetchLiveInventory());
 
 $('#liveCluster').addEventListener('change', () => {
@@ -2060,3 +2054,10 @@ function formatAxis(value) {
   if (value >= 1) return value.toFixed(1);
   return value.toFixed(2);
 }
+
+// Initialize after chart state and all event handlers exist. syncDataSourceUI()
+// calls showTab(), which reads charts even when no logs have been loaded yet.
+state.dataSource = $('#dataSource').value;
+syncDataSourceUI();
+if (state.dataSource === 'fetch') loadFetchClusters();
+else if (state.dataSource === 'live') fetchLiveInventory();
