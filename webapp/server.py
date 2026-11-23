@@ -47,7 +47,7 @@ import ingest as log_ingest
 HERE = os.path.dirname(os.path.abspath(__file__))
 STATIC_DIR = os.path.join(HERE, "static")
 DEFAULT_TOOL = os.path.join(os.path.dirname(HERE), "asloglatency", "log_latency.py")
-UI_VERSION = "2026.11.23.1"
+UI_VERSION = "2026.11.23.2"
 
 # Saved reports live outside the session tree so they survive a restart and a session
 # reap. Each report is two files: a small <id>.meta.json for the listing, and the full

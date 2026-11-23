@@ -123,6 +123,30 @@ retained; two jobs can run concurrently. The UI prevents clearing or replacing
 logs during its active analysis. The legacy synchronous analysis API endpoints
 remain available for existing scripts and can still encounter proxy timeouts.
 
+### Analysis performance
+
+The bundled latency parser caches repeated timestamp prefixes and reads all bucket
+pairs in one pass per bucket line. It preserves the existing histogram calculations
+and uses a bounded timestamp cache. A narrower custom incident window can also
+reduce analysis work; selecting fewer logs or histograms reduces the number of
+parser runs. Increasing Slice primarily reduces output resolution and does not
+eliminate scanning the input logs.
+
+To reproduce a synthetic parser benchmark on a test host:
+
+```bash
+git show b8e9d0e:asloglatency/log_latency.py > /tmp/aero-latency-before.py
+python3 analysis/benchmark_latency.py --nodes 30 --baseline-tool /tmp/aero-latency-before.py
+```
+
+The benchmark generates a log with 19,500 dumps across four histograms per logical
+node. It compares runtime and checks identical output hashes. Each logical node
+reuses the same generated file, so it measures warm-cache parser throughput, not
+production disk I/O or total upload and dashboard time. An initial local run with
+six workers improved from 87.9 seconds to 19.8 seconds for 120 histogram runs
+(about 4.4 times faster). Actual improvement depends on the server CPU, storage,
+log contents, and histogram count.
+
 ## Ansible fetch (DB nodes reachable only from Ansible)
 
 See [ansible/README.md](ansible/README.md).

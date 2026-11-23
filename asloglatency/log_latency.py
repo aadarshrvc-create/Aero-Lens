@@ -45,6 +45,7 @@
 #
 
 import datetime
+import functools
 import getopt
 import os
 import re
@@ -80,6 +81,7 @@ NS_HIST_TAG_PATTERNS = [HIST_TAG_PREFIX+"{%s}-%s "]
 NS_SLICE_SECONDS=5
 SCAN_SIZE = 1024 * 1024
 HIST_BUCKET_LINE_SUBSTRING = "hist.c:"
+HIST_BUCKET_VALUES_RE = re.compile(r'\(([0-9]{2}): ([^)\r\n]*)\)')
 SIZE_HIST_LIST = ["device-read-size", "device-write-size"]
 RECORD_HIST_LIST = ["query-rec-count"]
 #===========================================================
@@ -223,13 +225,16 @@ def read_bucket_values(line, file_id):
 	while True:
 		found = 0
 		if HIST_BUCKET_LINE_SUBSTRING in line:
-			for b in range(b_min, all_buckets):
-				pattern = r'.*?\(' + bucket_labels[b] + r': (.*?)\).*?'
-				r = re.compile(pattern)
-				if r.search(line):
-					found = found + 1
-					values[b] = int(r.search(line).group(1))
-					b_total = b_total + values[b]
+			# Read all bucket pairs once instead of scanning the whole line for
+			# each of the 17 (or 26) possible bucket labels.
+			seen = set()
+			for match in HIST_BUCKET_VALUES_RE.finditer(line):
+				b = int(match.group(1))
+				if b_min <= b < all_buckets and b not in seen:
+					seen.add(b)
+					found += 1
+					values[b] = int(match.group(2))
+					b_total += values[b]
 			if found == 0:
 				break
 		line = read_line(file_id)
@@ -291,6 +296,13 @@ def percentage_over(bucket, percentages):
 #
 def parse_dt(line):
 	prefix = line[0: line.find(" GMT")]
+	return parse_dt_prefix(prefix)
+
+# A histogram dump, its bucket lines, and ticker messages commonly share a
+# timestamp. Cache only timestamp prefixes, never complete log lines, and bound
+# the cache so long-running/tailing commands cannot accumulate unbounded data.
+@functools.lru_cache(maxsize=4096)
+def parse_dt_prefix(prefix):
 	try:
 		return datetime.datetime(*(time.strptime(prefix, DT_FMT)[0:6]))
 	except Exception:
@@ -476,7 +488,7 @@ def read_hist(hist_tags, after_dt, file_id, line = 0, end_dt=None, before_dt=Non
 			temp_sval = read_stat(line, relative_stat_path)
 			stat_values = add_stat_values(stat_values, temp_sval)
 
-		elif any(re.search(ht, line) for ht in hist_tags):
+		elif any(ht.search(line) for ht in hist_tags):
 			break
 
 		line = read_line(file_id)
@@ -760,6 +772,8 @@ def main(arg_log, arg_hist, arg_slice, arg_from, arg_duration, \
 		# It needs to read all bucket dumps for a slice
 		hist_tags = [s%(arg_hist) for s in HIST_TAG_PATTERNS]
 		read_all_dumps = True
+
+	hist_tags = [re.compile(tag) for tag in hist_tags]
 
 	# After this point we may need user input to stop:
 	if arg_from == "tail":
