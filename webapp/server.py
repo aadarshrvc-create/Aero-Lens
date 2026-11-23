@@ -47,7 +47,7 @@ import ingest as log_ingest
 HERE = os.path.dirname(os.path.abspath(__file__))
 STATIC_DIR = os.path.join(HERE, "static")
 DEFAULT_TOOL = os.path.join(os.path.dirname(HERE), "asloglatency", "log_latency.py")
-UI_VERSION = "2026.11.23.2"
+UI_VERSION = "2026.11.23.3"
 
 # Saved reports live outside the session tree so they survive a restart and a session
 # reap. Each report is two files: a small <id>.meta.json for the listing, and the full
@@ -909,7 +909,7 @@ def build_rollups(results, opts):
             ops_value = result["series"]["ops"][index]
             slow[slot] += overs[index] * ops_value
             weight[slot] += ops_value
-    pct_by_op = {op: [round(slow / weight_by_op[op][i], 3) if weight_by_op[op][i] else 0.0
+    pct_by_op = {op: [slow / weight_by_op[op][i] if weight_by_op[op][i] else 0.0
                       for i, slow in enumerate(series)]
                  for op, series in slow_by_op.items()}
 
@@ -997,8 +997,9 @@ def build_rollups(results, opts):
     # ---- headline ------------------------------------------------------
     headline = []
     if not any(r["breaches"] for r in op_rows):
-        headline.append("no operation type exceeded %.1f%% over %s ms in this window" % (
-            opts["alert_pct"], opts["alert_threshold"]))
+        used = sorted({"%s %s" % (r["summary"]["primary_threshold"], r["unit"]) for r in latency})
+        headline.append("no operation type exceeded %.1f%% over %s in this window" % (
+            opts["alert_pct"], " / ".join(used)))
     offenders = sorted(op_rows, key=lambda r: -r["worst_pct"])[:2]
     for entry in offenders:
         if entry["worst_pct"] > 0:

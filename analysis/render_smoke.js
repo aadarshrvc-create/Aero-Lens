@@ -27,6 +27,7 @@ class Node {
     this.hidden = false;
     this.checked = false;
     this.value = '';
+    this.clientWidth = 900;
   }
   set textContent(v) { this._text = v; this.children = []; }
   get textContent() { return this._text; }
@@ -65,7 +66,9 @@ class Node {
 class Text { constructor(d) { this.data = d; } }
 global.Node = Node;
 
-const ctx2d = new Proxy({}, { get: () => () => {} });
+const drawnLabels = [];
+const ctx2d = new Proxy({}, { get: (_, key) => key === 'fillText'
+  ? (label) => drawnLabels.push(label) : () => {} });
 const registry = new Map();
 ids.forEach((id) => registry.set(id, new Node('div')));
 registry.get('hideRoutine').checked = true;
@@ -97,7 +100,7 @@ global.document = {
   addEventListener() {},
   body: new Node('body'),
 };
-global.window = { addEventListener() {}, devicePixelRatio: 1 };
+global.window = { addEventListener() {}, devicePixelRatio: 1, innerWidth: 1200, innerHeight: 800 };
 global.requestAnimationFrame = (fn) => fn();
 global.cancelAnimationFrame = () => {};
 global.setInterval = () => 0;
@@ -116,7 +119,7 @@ const source = fs.readFileSync(path.join(WEBAPP, 'static', 'app.js'), 'utf8');
 const run = new Function(`${source}
 return { state, renderErrors, renderDashboard, buildEventDetail, renderErrCluster, showTab,
          requestedWindow, fmtTime, fmtStamp, localize, applyTz, readApiJson, requestAnalysis,
-         setAnalysisBusy, tz: () => TZ };`);
+         setAnalysisBusy, Chart, tip, fmtPct, latencyThresholdInfo, renderHeadline, updateZoomInfo, tz: () => TZ };`);
 const api = run();
 
 console.log('--- startup and upload controls ---');
@@ -378,4 +381,38 @@ console.log('\nALL RENDER CHECKS PASSED');
     global.fetch = originalFetch;
   }
   console.log('  busy controls, readable HTTP 504, polling retries, progress, result retrieval, and failed jobs passed');
+  console.log('--- chart hover precision and effective threshold ---');
+  if (api.fmtPct(.001) !== '0.001%' || api.fmtPct(.00000001) === '0.00%') {
+    throw new Error('small percentages rounded to zero');
+  }
+  const labelsStart = drawnLabels.length;
+  const chart = new api.Chart({ unit: '%', series: [{
+    name: 'batch read', color: '#fff', t: Array.from({ length: 1001 }, (_, i) => i + 1000),
+    v: Array.from({ length: 1001 }, (_, i) => i === 501 ? .001 : 0),
+  }] });
+  chart.canvas.clientWidth = 100;
+  chart.draw();
+  chart.showTip({ clientX: 80, clientY: 8 });
+  if (!api.tip.text().includes('0.001%') || chart.hover !== 1501) {
+    throw new Error('hover did not select the peak displayed in the pixel');
+  }
+  const percentLabels = drawnLabels.slice(labelsStart).filter((label) => label.endsWith('%'));
+  if (new Set(percentLabels).size < 5) throw new Error('tiny percentage axis labels are indistinguishable');
+  const thresholdData = { options: { alert_threshold: 6, alert_pct: 1 },
+    results: [{ kind: 'latency', unit: 'ms', series: { t: [1000] }, summary: { primary_threshold: 4 } }],
+    cumulative: { by_op: [], headline: ['no operation type exceeded 1% over 6 ms in this window'], distributions: [] } };
+  const info = api.latencyThresholdInfo(thresholdData);
+  if (!info.mismatch || info.label !== '4 ms' || !info.note.includes('Requested 6 ms')) {
+    throw new Error('requested and effective histogram thresholds are not explained');
+  }
+  api.renderHeadline(thresholdData);
+  const thresholdText = registry.get('headlinePanel').text();
+  if (!thresholdText.includes('over 4 ms') || thresholdText.includes('over 6 ms')) {
+    throw new Error('headline still claims the requested unsupported threshold');
+  }
+  api.state.range = [1000, 1021];
+  api.updateZoomInfo();
+  if (!registry.get('zoomLabel').textContent.includes('(21 s)')) throw new Error('short zoom window shown as zero minutes');
+  api.state.range = null;
+  console.log('  small values, peak hover, distinct axis labels, 6-to-4 ms mapping, and 21-second zoom passed');
 }()).catch((err) => { console.error(err); process.exitCode = 1; });

@@ -1,4 +1,5 @@
 import http.client
+import copy
 import json
 import os
 import shutil
@@ -164,7 +165,7 @@ class AnalysisHttpTests(unittest.TestCase):
         server.upload_result_payload(session, sid, time.time(), [], [])
         for endpoint in ['/api/analyze', '/api/errors']:
             status, job = self.request('POST', '/api/analysis/jobs', {
-                'endpoint': endpoint, 'request': {'session': sid}})
+                'endpoint': endpoint, 'request': {'session': sid, 'alert_threshold': 6}})
             self.assertEqual(status, 202)
             done = wait_for_job(self.store, job['job_id'])
             self.assertEqual(done['status'], 'completed', done.get('error'))
@@ -175,6 +176,21 @@ class AnalysisHttpTests(unittest.TestCase):
                 self.assertEqual(result['totals']['with_data'], 4)
                 self.assertEqual((done['completed'], done['total']), (4, 4))
                 self.assertEqual(len(session['raw']), 4)
+                self.assertEqual(result['options']['alert_threshold'], 6)
+                self.assertTrue(all(r['summary']['primary_threshold'] == 4 for r in result['results']))
+                self.assertIn('over 4 ms', result['cumulative']['headline'][0])
+                self.assertNotIn('over 6 ms', result['cumulative']['headline'][0])
+                # A small slow node must remain visible after weighting against
+                # a busy node; rounding to three decimals used to erase it.
+                entries = copy.deepcopy(result['results'])
+                reads = [r for r in entries if r['op'] == 'read']
+                reads[0]['series']['ops'][0] = 1
+                reads[1]['series']['ops'][0] = 1000000
+                primary = reads[0]['summary']['primary_index']
+                reads[0]['series']['overs'][primary][0] = .01
+                opts = dict(result['options'], from_dt=None, to_dt=None)
+                aggregate, _ = server.build_rollups(entries, opts)
+                self.assertAlmostEqual(aggregate['pct']['read'][0], .01 / 1000001, places=15)
             else:
                 self.assertEqual(result['severity_totals']['WARNING'], 2)
             if os.environ.get('AERO_TEST_EXPORT'):

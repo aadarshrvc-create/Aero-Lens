@@ -68,7 +68,8 @@ const fmtCount = (n) => {
   if (abs >= 1e3) return `${(n / 1e3).toFixed(1)}k`;
   return n.toFixed(abs < 10 && !Number.isInteger(n) ? 1 : 0);
 };
-const fmtPct = (n) => (n == null ? '-' : `${n.toFixed(2)}%`);
+const fmtPct = (n) => (n == null ? '-' : `${n !== 0 && Math.abs(n) < 1
+  ? Number(n.toPrecision(3)) : n.toFixed(2)}%`);
 const pad2 = (n) => String(n).padStart(2, '0');
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 
@@ -963,6 +964,27 @@ function download(text, filename, type) {
 // dashboard
 // ---------------------------------------------------------------------------
 
+function latencyThresholdInfo(data) {
+  const used = new Map();
+  for (const result of data.results || []) {
+    if (result.kind !== 'latency' || !result.series?.t?.length) continue;
+    const threshold = result.summary?.primary_threshold;
+    if (threshold != null) used.set(`${threshold} ${result.unit}`, { threshold, unit: result.unit });
+  }
+  if (!used.size) {
+    for (const row of data.cumulative?.by_op || []) {
+      if (row.threshold != null) used.set(`${row.threshold} ${row.unit}`, { threshold: row.threshold, unit: row.unit });
+    }
+  }
+  const requested = data.options.alert_threshold;
+  const label = [...used.keys()].join(' / ') || `${requested} ms`;
+  const mismatch = [...used.values()].some(({ threshold, unit }) =>
+    threshold !== requested * (['us', 'usec'].includes(unit) ? 1000 : 1));
+  return { label, mismatch, note: mismatch
+    ? `Requested ${requested} ms; using the nearest available histogram bucket${used.size > 1 ? 's' : ''}: ${label}. Exact percentages between bucket boundaries cannot be calculated from these logs.`
+    : '' };
+}
+
 function renderDashboard(data) {
   chartOwner = 'latency';
   clearCharts('latency');
@@ -977,6 +999,7 @@ function renderDashboard(data) {
 }
 
 function renderTiles(data) {
+  const threshold = latencyThresholdInfo(data);
   const cum = data.cumulative;
   const ops = cum.by_op;
   const parents = new Set((data.aggregate && data.aggregate.parent_ops) || []);
@@ -994,7 +1017,7 @@ function renderTiles(data) {
     ['worst latency', worst ? fmtPct(worst.worst_pct) : '-',
       worst ? `${worst.op} > ${worst.threshold} ${worst.unit} on ${worst.worst_node || 'unknown'}` : ''],
     ['breaching slices', String(breaches),
-      `above ${data.options.alert_pct}% over ${data.options.alert_threshold} ms, min ${fmtCount(data.options.min_ops_rate)} ops/sec`],
+      `above ${data.options.alert_pct}% over ${threshold.label}, min ${fmtCount(data.options.min_ops_rate)} ops/sec`],
     ['nodes analyzed', String(cum.by_node.length), data.cluster.size ? `of ${data.cluster.size} in cluster` : ''],
   ];
   const box = $('#statTiles');
@@ -1011,14 +1034,17 @@ function renderTiles(data) {
 function renderHeadline(data) {
   const box = $('#headlinePanel');
   box.textContent = '';
-  const lines = [...data.cumulative.headline];
+  const threshold = latencyThresholdInfo(data);
+  const lines = data.cumulative.headline.map((line) => line.startsWith('no operation type exceeded')
+    ? `no operation type exceeded ${data.options.alert_pct}% over ${threshold.label} in this window` : line);
+  if (threshold.note) lines.unshift(threshold.note);
   if (data.cumulative.absent_count) {
     lines.push(`${data.cumulative.absent_count} histogram/node combination(s) exist in the log but had no traffic in this window`);
   }
   if (data.cumulative.distributions.length) {
     lines.push(`${data.cumulative.distributions.length} count/size distribution histogram(s) excluded from latency alerting`);
   }
-  lines.slice(0, 4).forEach((text) => box.append(el('div', { class: 'headline', text: localize(text) })));
+  lines.slice(0, threshold.note ? 5 : 4).forEach((text) => box.append(el('div', { class: 'headline', text: localize(text) })));
 }
 
 function renderOverviewCharts(data) {
@@ -1030,7 +1056,8 @@ function renderOverviewCharts(data) {
     return;
   }
   $('#opsPanelHint').textContent = `summed across ${data.cumulative.by_node.length} node(s), ${aggregate.step}s slices`;
-  $('#latTitle').textContent = `Latency by operation — % of operations slower than ${aggregate.threshold} ${aggregate.unit}`;
+  const threshold = latencyThresholdInfo(data);
+  $('#latTitle').textContent = `Latency by operation — % of operations slower than ${threshold.label}`;
 
   const opsSeries = aggregate.order.map((op) => ({
     name: op, color: OP_COLORS[op] || OP_COLORS.other, t: aggregate.t, v: aggregate.ops[op],
@@ -1263,7 +1290,8 @@ function updateZoomInfo() {
   info.hidden = false;
   const [t0, t1] = state.range;
   const span = t1 - t0;
-  const length = span >= 3600 ? `${(span / 3600).toFixed(1)} h` : `${Math.round(span / 60)} min`;
+  const length = span < 60 ? `${Math.round(span)} s`
+    : span >= 3600 ? `${(span / 3600).toFixed(1)} h` : `${(span / 60).toFixed(1)} min`;
   $('#zoomLabel').textContent = `${fmtTime(t0, true)} → ${fmtTime(t1, false)} ${TZ.label} (${length})`;
 }
 
@@ -1859,7 +1887,7 @@ class Chart {
     this.height = height || 200;
     this.hidden = new Set();
     this.range = state.range;
-    this.pad = { l: 56, r: 12, t: 8, b: 22 };
+    this.pad = { l: 72, r: 12, t: 8, b: 22 };
     this.brush = null;
 
     this.canvas = el('canvas', { height: this.height });
@@ -1953,24 +1981,45 @@ class Chart {
     const [t0, t1] = this.activeRange();
     const time = this.xToTime(this.localX(event));
     if (time < t0 || time > t1) { tip.style.display = 'none'; return; }
+    // Long charts render the maximum value in each pixel. Select from those
+    // same samples, then read all series at one shared timestamp.
+    const candidates = this.visibleSeries().map((s) => {
+      let index = nearestIndex(s.t, time);
+      const pixel = Math.round(this.timeToX(time));
+      const start = this.xToTime(pixel - .5), end = this.xToTime(pixel + .5);
+      let best = null;
+      for (let i = lowerBound(s.t, start); i < s.t.length && s.t[i] <= end; i += 1) {
+        if (s.t[i] >= t0 && s.t[i] <= t1 && Number.isFinite(s.v[i])
+          && (best == null || s.v[i] > s.v[best])) best = i;
+      }
+      if (best != null) index = best;
+      if (index == null || s.t[index] < t0 || s.t[index] > t1 || !Number.isFinite(s.v[index])) return null;
+      const y = this.pad.t + (this.height - this.pad.t - this.pad.b)
+        * (1 - s.v[index] / (this.yTop || 1));
+      return { t: s.t[index], distance: Math.abs(event.clientY - this.canvas.getBoundingClientRect().top - y) };
+    }).filter(Boolean).sort((a, b) => a.distance - b.distance);
+    if (!candidates.length) { tip.style.display = 'none'; return; }
+    const sampleTime = candidates[0].t;
     const rows = [];
     for (const s of this.visibleSeries()) {
-      const index = nearestIndex(s.t, time);
+      const index = nearestIndex(s.t, sampleTime);
       if (index == null) continue;
+      if (s.t[index] < t0 || s.t[index] > t1 || !Number.isFinite(s.v[index])) continue;
       rows.push({ name: s.name, color: s.color, value: s.v[index], t: s.t[index] });
     }
     if (!rows.length) { tip.style.display = 'none'; return; }
     rows.sort((a, b) => b.value - a.value);
-    this.hover = time;
+    this.hover = sampleTime;
     this.draw();
 
     const table = el('table', {}, rows.map((r) => el('tr', {}, [
       el('td', {}, el('i', { style: `display:inline-block;width:9px;height:2px;background:${r.color}` })),
       el('td', { text: r.name }),
-      el('td', { class: 'v', text: this.unit === '%' ? fmtPct(r.value) : `${fmtCount(r.value)}/s` }),
+      el('td', { class: 'v', text: this.unit === '%' ? fmtPct(r.value)
+        : `${r.value !== 0 && Math.abs(r.value) < 1 ? Number(r.value.toPrecision(3)) : fmtCount(r.value)} ${this.unit}` }),
     ])));
     tip.textContent = '';
-    tip.append(el('div', { class: 't', text: `${fmtTime(rows[0].t, true)} ${TZ.label}` }), table);
+    tip.append(el('div', { class: 't', text: `${fmtTime(sampleTime, true)} ${TZ.label}` }), table);
     tip.style.display = 'block';
     const box = tip.getBoundingClientRect();
     tip.style.left = `${Math.min(event.clientX + 14, window.innerWidth - box.width - 10)}px`;
@@ -2003,6 +2052,7 @@ class Chart {
       for (let i = i0; i <= i1; i += 1) if (s.v[i] > maxY) maxY = s.v[i];
     }
     const yTop = niceCeil(maxY);
+    this.yTop = yTop;
     const yToPx = (value) => top + plotH - (value / yTop) * plotH;
 
     ctx.font = '11px -apple-system, system-ui, sans-serif';
@@ -2017,7 +2067,7 @@ class Chart {
       const value = (yTop * i) / 4;
       const y = Math.round(yToPx(value)) + 0.5;
       ctx.beginPath(); ctx.moveTo(l, y); ctx.lineTo(width - r, y); ctx.stroke();
-      ctx.fillText(this.unit === '%' ? `${formatAxis(value)}%` : formatAxis(value), l - 7, y);
+      ctx.fillText(this.unit === '%' ? fmtPct(value) : formatAxis(value), l - 7, y);
     }
 
     // time axis
