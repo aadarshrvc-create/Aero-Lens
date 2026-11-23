@@ -288,3 +288,47 @@ console.log('\nheadline text rendered:');
 headline.split('  ').filter((s) => s.trim()).slice(0, 8).forEach((s) => console.log('   ', s.trim()));
 console.log('\nALL RENDER CHECKS PASSED');
 }
+
+(async function checkClearUploads() {
+  console.log('--- clearing manual uploads for a new analysis ---');
+  api.state.dataSource = 'upload';
+  registry.get('dataSource').value = 'upload';
+  Object.assign(api.state, {
+    session: 'upload-session', files: [{ id: 'uploaded-log' }],
+    payload: {}, errors: {}, range: [1, 2], errorsKey: 'old-analysis',
+  });
+  api.state.selectedFiles.add('uploaded-log');
+  api.state.selectedHists.add('read');
+  registry.get('windowMode').value = 'range';
+  registry.get('fromDt').value = '2026-11-23T10:00:00';
+  registry.get('toDt').value = '2026-11-23T11:00:00';
+  api.showTab();
+  if (registry.get('clearUploadsBtn').hidden) throw new Error('Clear is hidden after manual analysis');
+  const clear = registry.get('clearUploadsBtn').listeners.click[0];
+  if (clear !== registry.get('clearSession').listeners.click[0]) throw new Error('Clear buttons use different resets');
+  const originalFetch = global.fetch;
+  try {
+    global.fetch = async () => ({ ok: false, status: 500 });
+    await clear();
+    if (api.state.session !== 'upload-session') throw new Error('failed reset discarded the session');
+    global.fetch = async (url, options) => {
+      if (url !== '/api/reset' || options.method !== 'POST'
+        || JSON.parse(options.body).session !== 'upload-session') throw new Error('incorrect reset request');
+      return { ok: true };
+    };
+    await clear();
+  } finally { global.fetch = originalFetch; }
+  if (api.state.session || api.state.files.length || api.state.payload || api.state.errors
+    || api.state.range || api.state.errorsKey || api.state.selectedFiles.size || api.state.selectedHists.size) {
+    throw new Error('Clear left old logs or analysis in state');
+  }
+  if (api.state.dataSource !== 'upload' || registry.get('dropzone').hidden
+    || !registry.get('dash').hidden || !registry.get('errdash').hidden
+    || !registry.get('clearUploadsBtn').hidden || registry.get('windowMode').value !== 'full'
+    || registry.get('fromDt').value || registry.get('toDt').value
+    || registry.get('logsCount').textContent !== '0') throw new Error('Clear did not reset the upload UI');
+  const clicks = registry.get('fileInput').clicks;
+  registry.get('uploadBtn').fire('click');
+  if (registry.get('fileInput').clicks !== clicks + 1) throw new Error('new upload picker failed after Clear');
+  console.log('  reset failure, successful clear, empty state, and next upload passed');
+}()).catch((err) => { console.error(err); process.exitCode = 1; });

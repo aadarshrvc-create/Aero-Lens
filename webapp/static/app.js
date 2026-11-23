@@ -654,22 +654,39 @@ function coversWindow(file) {
   if (window.to && file.first_iso > window.to) return false;
   return true;
 }
-$('#clearSession').addEventListener('click', async () => {
+async function clearSession() {
   if (state.session) {
-    await fetch('/api/reset', { method: 'POST', body: JSON.stringify({ session: state.session }) });
+    try {
+      const res = await fetch('/api/reset', { method: 'POST', body: JSON.stringify({ session: state.session }) });
+      if (!res.ok) throw new Error(`server returned ${res.status}`);
+    } catch (err) {
+      $('#runStatus').textContent = `Could not clear logs: ${err.message}`;
+      return;
+    }
   }
   Object.assign(state, { session: null, files: [], payload: null, range: null,
     errors: null, errorsKey: null, cluster: null, savedReport: null });
   state.selectedFiles.clear(); state.selectedHists.clear();
   state.selectedLiveNodes.clear();
+  charts.clear();
+  brushingChart = null;
+  tip.style.display = 'none';
+  $('#fileInput').value = '';
+  $('#windowMode').value = 'full';
+  $('#rangeFields').hidden = true;
+  $('#fromDt').value = ''; $('#toDt').value = '';
+  showLocalWindow();
   $('#uploadLog').textContent = ''; $('#skippedList').textContent = '';
   $('#logsPanel').hidden = true;
   $('#savedBanner').hidden = true;
   $('#errBadge').hidden = true;
   $('#clusterInfo').textContent = 'no logs loaded';
-  showTab();
-  renderLogs();
-});
+  $('#runStatus').textContent = 'Logs cleared. Upload logs to start a new analysis.';
+  syncDataSourceUI();
+  if (state.dataSource === 'upload') $('#dropzone').hidden = false;
+}
+$('#clearSession').addEventListener('click', clearSession);
+$('#clearUploadsBtn').addEventListener('click', clearSession);
 
 function renderLogs() {
   if (state.dataSource === 'live') {
@@ -1242,6 +1259,8 @@ function showTab() {
   // Saving needs a finished analysis; re-running needs the session that produced it.
   $('#saveBtn').disabled = !state.payload && !state.errors;
   $('#runBtn').disabled = !!state.savedReport;
+  $('#clearUploadsBtn').hidden = state.dataSource !== 'upload'
+    || !(state.files.length || state.payload || state.errors);
 
   const ready = errors ? state.errors : state.payload;
   const hint = $('#tabHint');
