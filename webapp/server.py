@@ -34,19 +34,20 @@ import time
 import urllib.parse
 import uuid
 import zipfile
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import errors as error_analysis
 import fetch as log_fetch
 import fetch_ansible as log_fetch_ansible
 import fetch_jobs as log_fetch_jobs
+from analysis_jobs import AnalysisJobs, JobLimitError
 import ingest as log_ingest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 STATIC_DIR = os.path.join(HERE, "static")
 DEFAULT_TOOL = os.path.join(os.path.dirname(HERE), "asloglatency", "log_latency.py")
-UI_VERSION = "2026.11.23"
+UI_VERSION = "2026.11.23.1"
 
 # Saved reports live outside the session tree so they survive a restart and a session
 # reap. Each report is two files: a small <id>.meta.json for the listing, and the full
@@ -115,11 +116,12 @@ OP_ORDER = ["read", "write", "batch read", "batch write", "batch index", "batch 
 
 SESSIONS = {}
 SESSION_LOCK = threading.Lock()
+ANALYSIS_JOBS = AnalysisJobs()
 
 # Static files are re-read per request but Python code is not, so an edited server.py
 # silently keeps serving the old logic until the process is restarted. Remember what
 # was loaded so /api/health can say when the running code is out of date.
-SOURCE_FILES = [os.path.join(HERE, name) for name in ("server.py", "errors.py")]
+SOURCE_FILES = [os.path.join(HERE, name) for name in ("server.py", "errors.py", "analysis_jobs.py")]
 LOADED_MTIMES = {path: os.path.getmtime(path) for path in SOURCE_FILES if os.path.exists(path)}
 STARTED_AT = time.time()
 
@@ -1245,6 +1247,11 @@ class Handler(BaseHTTPRequestHandler):
                             "ingest_auth": bool(INGEST_TOKEN),
                             "fetch_config": FETCH_CLUSTERS_PATH,
                             "fetch_enabled": bool(log_fetch.load_config(FETCH_CLUSTERS_PATH))})
+        elif parsed.path.startswith("/api/analysis/jobs/"):
+            job_id = parsed.path[len("/api/analysis/jobs/"):]
+            job = ANALYSIS_JOBS.get(job_id)
+            self.send_json(job or {"error": "Analysis job not found or expired. The server may have restarted."},
+                           200 if job else 404)
         elif parsed.path == "/api/fetch/clusters":
             cfg = log_fetch.load_config(FETCH_CLUSTERS_PATH)
             if not cfg:
@@ -1298,6 +1305,8 @@ class Handler(BaseHTTPRequestHandler):
         try:
             if self.path == "/api/upload":
                 self.handle_upload()
+            elif self.path == "/api/analysis/jobs":
+                self.handle_analysis_job()
             elif self.path == "/api/analyze":
                 self.handle_analyze()
             elif self.path == "/api/errors":
@@ -1320,11 +1329,36 @@ class Handler(BaseHTTPRequestHandler):
                 self.handle_fetch_complete()
             else:
                 self.send_json({"error": "not found"}, 404)
+        except (BrokenPipeError, ConnectionResetError):
+            self.close_connection = True
+            self.log_message("client disconnected during %s", self.path)
         except PermissionError as exc:
             self.send_json({"error": str(exc)}, 401)
         except Exception as exc:
             self.log_message("error handling %s: %s", self.path, exc)
             self.send_json({"error": str(exc)}, 500)
+
+    def handle_analysis_job(self):
+        body = json.loads(self.read_body(limit=1024 * 1024) or b"{}")
+        operations = {"/api/analyze": self.handle_analyze,
+                      "/api/errors": self.handle_errors,
+                      "/api/ingest/analyze": self.handle_ingest_analyze,
+                      "/api/ingest/errors": self.handle_ingest_errors}
+        operation = operations.get(body.get("endpoint"))
+        request = body.get("request")
+        if operation is None or not isinstance(request, dict):
+            self.send_json({"error": "Valid analysis endpoint and request are required"}, 400)
+            return
+        key = json.dumps(body, sort_keys=True)
+        try:
+            job = ANALYSIS_JOBS.submit(
+                lambda respond, progress: operation(request=request, respond=respond, progress=progress),
+                key=key, session=request.get("session"))
+        except JobLimitError as exc:
+            self.send_json({"error": str(exc)}, 429)
+            return
+        job["poll"] = "/api/analysis/jobs/" + job["job_id"]
+        self.send_json(job, 202)
 
     def handle_upload(self):
         sid = self.headers.get("X-Session") or uuid.uuid4().hex
@@ -1487,18 +1521,18 @@ class Handler(BaseHTTPRequestHandler):
         )
         self.send_json(payload)
 
-    def handle_analyze(self):
-        request = json.loads(self.read_body() or b"{}")
+    def handle_analyze(self, request=None, respond=None, progress=None):
+        if request is None:
+            request = json.loads(self.read_body() or b"{}")
+        respond = respond or self.send_json
         session = get_session(request.get("session"))
         if not session:
-            self.send_json({"error": "unknown session; upload a log first"}, 400)
-            return
+            return respond({"error": "unknown session; upload a log first"}, 400)
 
         file_ids = request.get("files") or list(session["files"].keys())
         selected = [session["files"][fid] for fid in file_ids if fid in session["files"]]
         if not selected:
-            self.send_json({"error": "no matching uploaded files"}, 400)
-            return
+            return respond({"error": "no matching uploaded files"}, 400)
 
         wanted = request.get("histograms") or []
         opts = {
@@ -1519,27 +1553,31 @@ class Handler(BaseHTTPRequestHandler):
             for hist in names:
                 jobs.append((entry, hist, units[hist]))
         if not jobs:
-            self.send_json({"error": "selected histograms are not present in the selected logs"}, 400)
-            return
+            return respond({"error": "selected histograms are not present in the selected logs"}, 400)
 
+        if progress:
+            progress(0, len(jobs))
         started = time.time()
         results = []
         with ThreadPoolExecutor(max_workers=min(6, (os.cpu_count() or 2))) as pool:
             futures = {pool.submit(run_one, self.tool_path, entry, hist, unit, opts):
                        (entry, hist) for entry, hist, unit in jobs}
-            for future, (entry, hist) in futures.items():
+            for future in as_completed(futures):
+                entry, hist = futures[future]
                 try:
                     results.append(future.result())
                 except Exception as exc:
                     self.log_message("run failed for %s %s: %s", entry["label"], hist, exc)
                     results.append(failed_run(entry, hist, exc))
+                if progress:
+                    progress(len(results), len(jobs))
 
         results.sort(key=lambda r: (OP_ORDER.index(r["op"]) if r["op"] in OP_ORDER else 99,
                                     r["file"], r["histogram"]))
         session["raw"] = {r["id"]: r.pop("raw") for r in results}
         aggregate, cumulative = build_rollups(results, opts)
 
-        self.send_json({
+        return respond({
             "session": session["id"],
             "elapsed_seconds": round(time.time() - started, 2),
             "cluster": session_cluster(session),
@@ -1562,18 +1600,18 @@ class Handler(BaseHTTPRequestHandler):
             "results": results,
         })
 
-    def handle_errors(self):
-        request = json.loads(self.read_body() or b"{}")
+    def handle_errors(self, request=None, respond=None, progress=None):
+        if request is None:
+            request = json.loads(self.read_body() or b"{}")
+        respond = respond or self.send_json
         session = get_session(request.get("session"))
         if not session:
-            self.send_json({"error": "unknown session; upload a log first"}, 400)
-            return
+            return respond({"error": "unknown session; upload a log first"}, 400)
 
         file_ids = request.get("files") or list(session["files"].keys())
         selected = [session["files"][fid] for fid in file_ids if fid in session["files"]]
         if not selected:
-            self.send_json({"error": "no matching uploaded files"}, 400)
-            return
+            return respond({"error": "no matching uploaded files"}, 400)
 
         from_dt = parse_dt_param(request.get("from"))
         to_dt = parse_dt_param(request.get("to"))
@@ -1584,16 +1622,14 @@ class Handler(BaseHTTPRequestHandler):
         ends = [epoch(datetime.datetime.strptime(e["scan"]["last_ts"], LOG_DT_FMT))
                 for e in selected if e["scan"]["last_ts"]]
         if not starts:
-            self.send_json({"error": "selected logs have no timestamped lines"}, 400)
-            return
+            return respond({"error": "selected logs have no timestamped lines"}, 400)
         coverage = (min(starts), max(ends or starts))
 
         # The scan is seconds per gigabyte, so repeat views of the same window are cached.
         key = json.dumps([sorted(f["id"] for f in selected), window], sort_keys=True)
         cached = session.get("error_cache", {}).get(key)
         if cached is not None:
-            self.send_json(dict(cached, cached=True))
-            return
+            return respond(dict(cached, cached=True))
 
         entries = [(f["path"], f["node"]) for f in selected]
         report = error_analysis.analyze_errors(entries, window, coverage)
@@ -1601,7 +1637,7 @@ class Handler(BaseHTTPRequestHandler):
         report["cluster"] = session_cluster(session)
         report["cached"] = False
         session.setdefault("error_cache", {})[key] = report
-        self.send_json(report)
+        return respond(report)
 
     def handle_save_report(self):
         request = json.loads(self.read_body() or b"{}")
@@ -1627,6 +1663,9 @@ class Handler(BaseHTTPRequestHandler):
 
     def handle_reset(self):
         request = json.loads(self.read_body() or b"{}")
+        if request.get("session") and ANALYSIS_JOBS.active_for_session(request["session"]):
+            self.send_json({"error": "Analysis is still running. Wait for it to finish before clearing logs."}, 409)
+            return
         with SESSION_LOCK:
             session = SESSIONS.pop(request.get("session"), None)
         if session:
@@ -1676,13 +1715,14 @@ class Handler(BaseHTTPRequestHandler):
                     pass
             raise
 
-    def handle_ingest_errors(self):
-        request = json.loads(self.read_body() or b"{}")
+    def handle_ingest_errors(self, request=None, respond=None, progress=None):
+        if request is None:
+            request = json.loads(self.read_body() or b"{}")
+        respond = respond or self.send_json
         cluster = request.get("cluster")
         nodes = request.get("nodes") or []
         if not cluster or not nodes:
-            self.send_json({"error": "cluster and nodes[] are required"}, 400)
-            return
+            return respond({"error": "cluster and nodes[] are required"}, 400)
 
         from_dt = parse_dt_param(request.get("from"))
         to_dt = parse_dt_param(request.get("to"))
@@ -1695,15 +1735,14 @@ class Handler(BaseHTTPRequestHandler):
             ends = [epoch(datetime.datetime.strptime(e["scan"]["last_ts"], LOG_DT_FMT))
                     for e in built if e["scan"]["last_ts"]]
             if not starts:
-                self.send_json({"error": "no timestamped lines in ingested slice"}, 400)
-                return
+                return respond({"error": "no timestamped lines in ingested slice"}, 400)
             coverage = (min(starts), max(ends or starts))
             entries = [(e["path"], e["node"]) for e in built]
             report = error_analysis.analyze_errors(entries, window, coverage)
             report["source"] = "ingest"
             report["cluster"] = {"name": cluster, "nodes": len(nodes)}
             report["ingest"] = {"cluster": cluster, "nodes": nodes, "dir": INGEST_DIR}
-            self.send_json(report)
+            return respond(report)
         finally:
             for path in cleanup:
                 try:
@@ -1711,13 +1750,14 @@ class Handler(BaseHTTPRequestHandler):
                 except OSError:
                     pass
 
-    def handle_ingest_analyze(self):
-        request = json.loads(self.read_body() or b"{}")
+    def handle_ingest_analyze(self, request=None, respond=None, progress=None):
+        if request is None:
+            request = json.loads(self.read_body() or b"{}")
+        respond = respond or self.send_json
         cluster = request.get("cluster")
         nodes = request.get("nodes") or []
         if not cluster or not nodes:
-            self.send_json({"error": "cluster and nodes[] are required"}, 400)
-            return
+            return respond({"error": "cluster and nodes[] are required"}, 400)
 
         from_dt = parse_dt_param(request.get("from"))
         to_dt = parse_dt_param(request.get("to"))
@@ -1744,26 +1784,30 @@ class Handler(BaseHTTPRequestHandler):
                 for hist in names:
                     jobs.append((file_entry, hist, units[hist]))
             if not jobs:
-                self.send_json({"error": "no histogram dumps in ingested slice for selected nodes"}, 400)
-                return
+                return respond({"error": "no histogram dumps in ingested slice for selected nodes"}, 400)
 
+            if progress:
+                progress(0, len(jobs))
             started = time.time()
             results = []
             with ThreadPoolExecutor(max_workers=min(6, (os.cpu_count() or 2))) as pool:
                 futures = {pool.submit(run_one, self.tool_path, entry, hist, unit, opts):
                            (entry, hist) for entry, hist, unit in jobs}
-                for future, (entry, hist) in futures.items():
+                for future in as_completed(futures):
+                    entry, hist = futures[future]
                     try:
                         results.append(future.result())
                     except Exception as exc:
                         self.log_message("ingest run failed for %s %s: %s", entry["label"], hist, exc)
                         results.append(failed_run(entry, hist, exc))
+                    if progress:
+                        progress(len(results), len(jobs))
 
             results.sort(key=lambda r: (OP_ORDER.index(r["op"]) if r["op"] in OP_ORDER else 99,
                                         r["file"], r["histogram"]))
             raw_map = {r["id"]: r.pop("raw") for r in results}
             aggregate, cumulative = build_rollups(results, opts)
-            self.send_json({
+            return respond({
                 "source": "ingest",
                 "elapsed_seconds": round(time.time() - started, 2),
                 "cluster": {"name": cluster, "nodes": len(nodes)},

@@ -115,7 +115,8 @@ const source = fs.readFileSync(path.join(WEBAPP, 'static', 'app.js'), 'utf8');
 // app.js is a plain script; eval it in this global so its top-level code runs.
 const run = new Function(`${source}
 return { state, renderErrors, renderDashboard, buildEventDetail, renderErrCluster, showTab,
-         requestedWindow, fmtTime, fmtStamp, localize, applyTz, tz: () => TZ };`);
+         requestedWindow, fmtTime, fmtStamp, localize, applyTz, readApiJson, requestAnalysis,
+         setAnalysisBusy, tz: () => TZ };`);
 const api = run();
 
 console.log('--- startup and upload controls ---');
@@ -165,6 +166,7 @@ let opened = 0;
 for (const box of ['errEvents', 'errCounters']) {
   for (const row of registry.get(box).children) {
     const head = row.children[0];
+    if (!head?.listeners.click?.length) continue; // Empty-state messages are not expandable rows.
     head.fire('click');
     opened += 1;
   }
@@ -331,4 +333,49 @@ console.log('\nALL RENDER CHECKS PASSED');
   registry.get('uploadBtn').fire('click');
   if (registry.get('fileInput').clicks !== clicks + 1) throw new Error('new upload picker failed after Clear');
   console.log('  reset failure, successful clear, empty state, and next upload passed');
+  console.log('--- background analysis and proxy errors ---');
+  api.setAnalysisBusy(true);
+  for (const id of ['runBtn', 'uploadBtn', 'clearSession', 'clearUploadsBtn', 'dataSource']) {
+    if (!registry.get(id).disabled) throw new Error(`${id} enabled during analysis`);
+  }
+  api.setAnalysisBusy(false);
+  if (registry.get('uploadBtn').disabled) throw new Error('Upload remained disabled after analysis');
+  const response = (status, body) => ({ status, ok: status < 400, text: async () =>
+    typeof body === 'string' ? body : JSON.stringify(body) });
+  try {
+    await api.readApiJson(response(504, '<html><body>Gateway timeout</body></html>'));
+    throw new Error('HTML timeout was accepted');
+  } catch (err) {
+    if (!err.message.includes('HTTP 504') || !err.retryable) throw err;
+  }
+  const originalTimer = global.setTimeout;
+  let calls = 0;
+  const progress = [];
+  global.setTimeout = (fn) => { fn(); return 0; };
+  global.fetch = async (url, options) => {
+    calls += 1;
+    if (calls === 1) {
+      if (url !== '/api/analysis/jobs' || JSON.parse(options.body).endpoint !== '/api/analyze') {
+        throw new Error('analysis did not use background submission');
+      }
+      return response(202, { job_id: 'job1', status: 'running' });
+    }
+    if (url !== '/api/analysis/jobs/job1') throw new Error('incorrect job polling URL');
+    if (calls === 2) return response(504, '<html>Gateway timeout</html>');
+    if (calls === 3) return response(200, { job_id: 'job1', status: 'running', completed: 4, total: 10 });
+    return response(200, { job_id: 'job1', status: 'completed', result: { complete: true } });
+  };
+  try {
+    const result = await api.requestAnalysis('/api/analyze', { session: 'session1' }, (job) => progress.push(job.completed));
+    if (!result.complete || calls !== 4 || !progress.includes(4)) throw new Error('polling lost result or progress');
+    global.fetch = async () => response(202, { job_id: 'bad', status: 'failed', error: 'missing logs' });
+    try {
+      await api.requestAnalysis('/api/errors', {});
+      throw new Error('failed job was accepted');
+    } catch (err) { if (err.message !== 'missing logs') throw err; }
+  } finally {
+    global.setTimeout = originalTimer;
+    global.fetch = originalFetch;
+  }
+  console.log('  busy controls, readable HTTP 504, polling retries, progress, result retrieval, and failed jobs passed');
 }()).catch((err) => { console.error(err); process.exitCode = 1; });

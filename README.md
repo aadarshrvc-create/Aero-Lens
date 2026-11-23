@@ -110,6 +110,19 @@ reverse proxy upstream address and its logs. A 504 occurring only during a long
 fetch or analysis may be a proxy timeout; keeping the service running addresses
 logout-related failures but does not change proxy timeout settings.
 
+Latency and error analysis in the UI run as background jobs. The browser submits
+the work and polls short status requests, so a large cluster analysis does not
+need one HTTP connection to remain open for several minutes. Latency runs show
+completed histograms as they progress. Transient polling failures are retried;
+proxy errors are displayed with their HTTP status instead of a JSON parsing error.
+
+Deploy both the Python and frontend changes together, restart `aero-lens`, and
+hard-refresh the browser. Analysis jobs are held in memory and are lost on a
+restart. Completed results are retained for up to one hour, with at most 16 jobs
+retained; two jobs can run concurrently. The UI prevents clearing or replacing
+logs during its active analysis. The legacy synchronous analysis API endpoints
+remain available for existing scripts and can still encounter proxy timeouts.
+
 ## Ansible fetch (DB nodes reachable only from Ansible)
 
 See [ansible/README.md](ansible/README.md).

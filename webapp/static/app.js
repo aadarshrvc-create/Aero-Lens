@@ -20,6 +20,7 @@ const state = {
   fetchCatalog: null,
   fetchCluster: '',
   fetchJobId: null,
+  analysisRunning: false,
 };
 
 const OP_COLORS = {
@@ -504,6 +505,7 @@ function renderReports() {
 }
 
 async function openReport(id) {
+  if (state.analysisRunning) return;
   $('#runStatus').textContent = 'opening saved report…';
   try {
     const report = await (await fetch(`/api/reports/${encodeURIComponent(id)}`)).json();
@@ -560,6 +562,7 @@ $('#fileInput').addEventListener('change', () => { uploadAll([...$('#fileInput')
 document.addEventListener('drop', (e) => uploadAll([...e.dataTransfer.files]));
 
 async function uploadAll(files) {
+  if (state.analysisRunning) return;
   for (const file of files) {
     const row = el('div', { text: `uploading ${file.name} (${fmtBytes(file.size)})…` });
     $('#uploadLog').append(row);
@@ -655,6 +658,7 @@ function coversWindow(file) {
   return true;
 }
 async function clearSession() {
+  if (state.analysisRunning) return;
   if (state.session) {
     try {
       const res = await fetch('/api/reset', { method: 'POST', body: JSON.stringify({ session: state.session }) });
@@ -825,9 +829,61 @@ document.querySelectorAll('.btn[data-last]').forEach((btn) => btn.addEventListen
 // run
 // ---------------------------------------------------------------------------
 
+async function readApiJson(res) {
+  const text = await res.text();
+  let data;
+  try { data = JSON.parse(text); } catch (_) {
+    const error = new Error(`HTTP ${res.status}: ${[502, 503, 504].includes(res.status)
+      ? 'The proxy or backend is unavailable or timed out. Check the service and proxy logs.'
+      : 'The server returned an unexpected response instead of JSON.'}`);
+    error.retryable = [502, 503, 504].includes(res.status);
+    throw error;
+  }
+  if (!res.ok) {
+    const error = new Error(`HTTP ${res.status}: ${data.error || res.statusText}`);
+    error.retryable = [502, 503, 504].includes(res.status);
+    throw error;
+  }
+  return data;
+}
+
+function setAnalysisBusy(busy) {
+  state.analysisRunning = busy;
+  for (const id of ['runBtn', 'uploadBtn', 'clearSession', 'clearUploadsBtn',
+    'dataSource', 'fetchLogsBtn', 'refreshLiveBtn', 'reportsBtn']) {
+    $(`#${id}`).disabled = busy;
+  }
+  $('#runBtn').disabled = busy || !!state.savedReport;
+}
+
+async function requestAnalysis(endpoint, request, onProgress = () => {}) {
+  const res = await fetch('/api/analysis/jobs', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ endpoint, request }),
+  });
+  if (res.status === 404) throw new Error('Restart the Aero Lens server to enable background analysis.');
+  let job = await readApiJson(res);
+  const poll = `/api/analysis/jobs/${encodeURIComponent(job.job_id)}`;
+  let failures = 0;
+  while (true) {
+    onProgress(job);
+    if (job.status === 'completed') return job.result;
+    if (job.status === 'failed') throw new Error(job.error || 'Analysis failed');
+    await new Promise((resolve) => setTimeout(resolve, 2000));
+    try {
+      job = await readApiJson(await fetch(poll));
+      failures = 0;
+    } catch (err) {
+      if ((err.retryable || err instanceof TypeError) && ++failures < 4) continue;
+      throw new Error(`${err.message} (analysis job ${job.job_id}; results may still be processing on the server)`);
+    }
+  }
+}
+
 $('#runBtn').addEventListener('click', () => (state.tab === 'errors' ? runErrors(true) : runLatency()));
 
 async function runLatency() {
+  if (state.analysisRunning) return;
   if (state.dataSource === 'live') {
     if (!liveSelectionReady()) { $('#runStatus').textContent = 'select cluster and at least one node'; return; }
   } else if (!state.selectedFiles.size) { $('#runStatus').textContent = 'select at least one log'; return; }
@@ -865,17 +921,18 @@ async function runLatency() {
     to: range ? range.to : null,
   };
 
-  $('#runBtn').disabled = true;
+  setAnalysisBusy(true);
+  let progress = '';
   const started = Date.now();
   const ticker = setInterval(() => {
-    $('#runStatus').textContent = `running… ${((Date.now() - started) / 1000).toFixed(0)}s`;
+    $('#runStatus').textContent = `running… ${((Date.now() - started) / 1000).toFixed(0)}s${progress}`;
   }, 500);
   $('#runStatus').textContent = 'running…';
   try {
     const url = state.dataSource === 'live' ? '/api/ingest/analyze' : '/api/analyze';
-    const res = await fetch(url, { method: 'POST', body: JSON.stringify(body) });
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.error || res.statusText);
+    const data = await requestAnalysis(url, body, (job) => {
+      progress = job.total ? ` · ${job.completed}/${job.total} histograms` : '';
+    });
     state.payload = data;
     state.range = null;
     $('#logsPanel').hidden = true;
@@ -886,7 +943,7 @@ async function runLatency() {
     $('#runStatus').textContent = `failed: ${err.message}`;
   } finally {
     clearInterval(ticker);
-    $('#runBtn').disabled = false;
+    setAnalysisBusy(false);
   }
 }
 
@@ -1258,7 +1315,7 @@ function showTab() {
   $('#zoomInfo').hidden = !state.range;
   // Saving needs a finished analysis; re-running needs the session that produced it.
   $('#saveBtn').disabled = !state.payload && !state.errors;
-  $('#runBtn').disabled = !!state.savedReport;
+  $('#runBtn').disabled = state.analysisRunning || !!state.savedReport;
   $('#clearUploadsBtn').hidden = state.dataSource !== 'upload'
     || !(state.files.length || state.payload || state.errors);
 
@@ -1310,6 +1367,7 @@ function errorsKey() {
 }
 
 async function runErrors(force) {
+  if (state.analysisRunning) return;
   if (state.dataSource === 'live') {
     if (!liveSelectionReady()) { $('#runStatus').textContent = 'select cluster and at least one node'; return; }
   } else if (!state.selectedFiles.size) { $('#runStatus').textContent = 'select at least one log'; return; }
@@ -1328,7 +1386,7 @@ async function runErrors(force) {
     to: range ? range.to : null,
   };
 
-  $('#runBtn').disabled = true;
+  setAnalysisBusy(true);
   const started = Date.now();
   const ticker = setInterval(() => {
     $('#runStatus').textContent = `scanning for errors… ${((Date.now() - started) / 1000).toFixed(0)}s`;
@@ -1336,9 +1394,7 @@ async function runErrors(force) {
   $('#runStatus').textContent = 'scanning for errors…';
   try {
     const url = state.dataSource === 'live' ? '/api/ingest/errors' : '/api/errors';
-    const res = await fetch(url, { method: 'POST', body: JSON.stringify(body) });
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.error || res.statusText);
+    const data = await requestAnalysis(url, body);
     state.errors = data;
     state.errorsKey = key;
     $('#logsPanel').hidden = true;
@@ -1356,7 +1412,7 @@ async function runErrors(force) {
     $('#runStatus').textContent = `failed: ${err.message}`;
   } finally {
     clearInterval(ticker);
-    $('#runBtn').disabled = false;
+    setAnalysisBusy(false);
   }
 }
 
